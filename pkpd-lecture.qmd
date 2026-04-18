@@ -1,0 +1,877 @@
+---
+title: "Introduction to PK/PD Modeling"
+subtitle: "A systems biology perspective with R"
+author: "Instructor"
+format:
+  revealjs:
+    theme: simple
+    slide-number: true
+    incremental: false
+    toc: false
+execute:
+  echo: true
+  warning: false
+  message: false
+editor: visual
+---
+
+## Welcome
+
+This lecture introduces pharmacokinetic and pharmacodynamic modeling for graduate students in biomedical sciences and systems biology. The emphasis is on conceptual understanding, practical implementation in R, and how modeling choices relate to biological interpretation.
+
+We will use the built-in `Theoph` dataset to demonstrate core ideas in model fitting, visualization, and interpretation.
+
+## Learning objectives
+
+By the end of this lecture, students should be able to:
+
+-   distinguish pharmacokinetics from pharmacodynamics
+-   explain the meaning of common PK parameters such as clearance, volume, absorption rate, and elimination rate
+-   fit simple PK models in R using `lm` and `nls`
+-   explain the motivation for mixed-effects models and fit a basic model with `nlme`
+-   connect PK models to PD models such as the Emax model
+-   interpret results in a biologically meaningful way
+
+## Why PK/PD in systems biology?
+
+PK/PD modeling fits naturally within systems biology because both fields focus on dynamic processes, parameter estimation, and mechanistic interpretation.
+
+A pharmacokinetic model tracks how drug concentration changes over time. A pharmacodynamic model relates drug concentration to biological effect. Together, PK/PD models connect drug input to system response.
+
+This is useful in:
+
+-   dose selection
+-   translational modeling
+-   biomarker analysis
+-   experimental design
+-   hypothesis generation about mechanism
+
+## Roadmap for today
+
+1.  Core PK and PD concepts
+2.  Theophylline dataset
+3.  Exploratory plots
+4.  Linear and nonlinear PK fitting
+5.  Population modeling with `nlme`
+6.  PK/PD coupling ideas
+7.  Model diagnostics and interpretation
+8.  Assignment for next week
+
+## Prerequisites — how to follow this lecture
+
+- No R experience required. Slides include runnable code, but heavy fits are precomputed so class time focuses on concepts and interpretation.
+- If you want to run code locally:
+  - R or RStudio is helpful but not required for following the slides.
+  - For Python users, a companion notebook is available in the repo (recommended).
+- Quick R primer (copy/paste to try a few lines):
+
+```{r}
+# minimal R to view the dataset and make a plot
+library(ggplot2)
+data(Theoph)
+head(Theoph)
+```
+
+- If package installation is an issue, use the pre-rendered figures included in the slides.
+
+## PK versus PD
+
+**Pharmacokinetics (PK)** asks: what does the body do to the drug?
+
+Key processes include:
+
+-   absorption
+-   distribution
+-   metabolism
+-   elimination
+
+**Pharmacodynamics (PD)** asks: what does the drug do to the body?
+
+Key questions include:
+
+-   what is the maximal effect?
+-   what concentration is needed for half-maximal effect?
+-   how delayed is the response?
+-   is the response direct or indirect?
+
+## A first PK picture
+
+For a simple one-compartment IV bolus model, concentration declines exponentially:
+
+$$
+C(t) = C_0 e^{-k_e t}
+$$
+
+where:
+
+-   $C(t)$ is concentration at time $t$
+-   $C_0$ is the initial concentration
+-   $k_e$ is the elimination rate constant
+
+The half-life is:
+
+$$
+t_{1/2} = \frac{\ln 2}{k_e}
+$$
+
+This simple model is often the starting point for understanding more realistic models.
+
+## Oral dosing and first-order absorption
+
+For oral dosing, we often need both absorption and elimination. A standard one-compartment model with first-order absorption can be written as:
+
+$$
+C(t) = \frac{D k_a}{V(k_a-k_e)} \left(e^{-k_e t} - e^{-k_a t}\right)
+$$
+
+where:
+
+-   $D$ is dose
+-   $V$ is apparent volume of distribution
+-   $k_a$ is absorption rate constant
+-   $k_e$ is elimination rate constant
+
+This is closer to the structure seen in the `Theoph` dataset.
+
+## Slide placeholder: compartment diagram
+
+**Placeholder for instructor-added figure**
+
+Suggested diagram:
+
+-   depot compartment for oral absorption
+-   central compartment
+-   arrow labeled $k_a$ from depot to central
+-   arrow labeled $k_e$ or clearance from central outward
+
+You can replace this slide with your own schematic.
+
+## Load the data
+
+```{r}
+Theoph
+```
+
+## What is the Theoph dataset?
+
+The `Theoph` dataset is a classic dataset included with R. It contains serum theophylline concentrations measured in 12 subjects after an oral dose.
+
+Variables include:
+
+-   `Subject`: subject identifier
+-   `Wt`: body weight
+-   `Dose`: administered dose
+-   `Time`: time after dose
+-   `conc`: measured concentration
+
+This dataset is ideal for demonstrating both individual and population PK modeling.
+
+## Inspect the data
+
+```{r}
+summary(Theoph)
+```
+
+Notice that each subject has repeated measurements over time. This repeated-measures structure is one reason mixed-effects methods are useful.
+
+## Plot all concentration-time profiles
+
+```{r}
+library(ggplot2)
+
+ggplot(Theoph, aes(x = Time, y = conc, group = Subject, color = Subject)) +
+  geom_point() +
+  geom_line() +
+  labs(
+    title = "Theophylline concentration-time data",
+    x = "Time (hours)",
+    y = "Concentration"
+  ) +
+  theme_minimal()
+```
+
+## What do we see?
+
+Several important patterns should stand out:
+
+-   concentration rises initially after oral dosing
+-   concentration later declines as elimination dominates
+-   subjects differ in peak concentration and timing
+-   there is visible inter-individual variability
+
+This immediately suggests that a single curve for all individuals may be inadequate.
+
+## Explore one subject first
+
+To build intuition, it helps to start with a single subject.
+
+```{r}
+sub1 <- subset(Theoph, Subject == 1)
+
+ggplot(sub1, aes(x = Time, y = conc)) +
+  geom_point(size = 2) +
+  geom_line() +
+  labs(
+    title = "Subject 1 concentration-time profile",
+    x = "Time (hours)",
+    y = "Concentration"
+  ) +
+  theme_minimal()
+```
+
+## Why start simple?
+
+A useful modeling principle is to begin with the simplest model that captures the main trend, then increase complexity only when needed.
+
+In this lecture, that means:
+
+-   start with log-linear thinking
+-   move to nonlinear least squares
+-   then move to nonlinear mixed effects
+-   finally discuss PK/PD coupling
+
+## Linearization idea
+
+If the data follow a pure exponential decay phase, then:
+
+$$
+C(t) = C_0 e^{-k_e t}
+$$
+
+Taking logs gives:
+
+$$
+\log C(t) = \log C_0 - k_e t
+$$
+
+This suggests that during the terminal elimination phase, a straight line may appear on a semilog plot.
+
+## Terminal-phase approximation for one subject
+
+For oral data, the full trajectory is not globally log-linear because absorption occurs first. But the terminal portion may be approximately log-linear.
+
+Let us use later time points from Subject 1 as a rough example.
+
+```{r}
+sub1_late <- subset(sub1, Time >= 4)
+
+ggplot(sub1_late, aes(x = Time, y = log(conc))) +
+  geom_point(size = 2) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    title = "Approximate terminal phase for Subject 1",
+    x = "Time (hours)",
+    y = "log(Concentration)"
+  ) +
+  theme_minimal()
+```
+
+## Fit a simple linear model
+
+```{r}
+fit_lm <- lm(log(conc) ~ Time, data = sub1_late)
+summary(fit_lm)
+```
+
+## Interpreting the linear fit
+
+In the model
+
+$$
+\log C(t) = \beta_0 + \beta_1 t
+$$
+
+we interpret:
+
+-   $\beta_0 \approx \log C_0$
+-   $\beta_1 \approx -k_e$
+
+So an estimate of the elimination rate constant is approximately:
+
+```{r}
+ke_hat_lm <- -coef(fit_lm)[["Time"]]
+ke_hat_lm
+```
+
+And the half-life estimate is:
+
+```{r}
+t_half_lm <- log(2) / ke_hat_lm
+t_half_lm
+```
+
+## What are the limitations of `lm` here?
+
+This linearized approach is useful pedagogically, but it has important limitations:
+
+-   it only applies to the terminal phase
+-   it ignores the absorption process
+-   the log transformation changes the error structure
+-   parameter estimates depend on the chosen subset of points
+
+So while `lm` is a good entry point, it is not the full solution for oral PK.
+
+## Nonlinear least squares
+
+A better approach is to fit the model in its natural nonlinear form.
+
+For a simple exponential decay model:
+
+$$
+C(t) = C_0 e^{-k_e t}
+$$
+
+we can use `nls()` to estimate parameters directly.
+
+## Fit a simple nonlinear model to late-phase data
+
+```{r}
+fit_nls_simple <- nls(
+  conc ~ C0 * exp(-ke * Time),
+  data = sub1_late,
+  start = list(C0 = max(sub1_late$conc), ke = 0.1)
+)
+
+summary(fit_nls_simple)
+```
+
+## Compare observed and fitted values
+
+```{r}
+sub1_late$pred_nls_simple <- predict(fit_nls_simple)
+
+ggplot(sub1_late, aes(x = Time, y = conc)) +
+  geom_point(size = 2) +
+  geom_line(aes(y = pred_nls_simple), linewidth = 1) +
+  labs(
+    title = "Observed vs nonlinear fit for terminal phase",
+    x = "Time (hours)",
+    y = "Concentration"
+  ) +
+  theme_minimal()
+```
+
+## From simple decay to oral absorption model
+
+For oral dosing we use the standard one-compartment model with first-order absorption and elimination. The analytic solution for the concentration in the central compartment after an oral bolus dose D is:
+
+\[
+C(t) = \frac{D\,k_a}{V( k_a - k_e)}\left(e^{-k_e t} - e^{-k_a t}\right)
+\]
+
+where D is the administered dose and V is the apparent volume of distribution. This is the mechanistic PK solution we will use rather than the earlier lumped biexponential form.
+
+```{r}
+# PK solution function for a single oral dose (one-compartment, first-order absorption)
+pk_oral_1cmt <- function(Time, Dose, V, ka, ke) {
+  if (abs(ka - ke) < .Machine$double.eps) {
+    # guarded limit when ka ~ ke: use limit form
+    (Dose * ka / V) * Time * exp(-ke * Time)
+  } else {
+    (Dose * ka) / (V * (ka - ke)) * (exp(-ke * Time) - exp(-ka * Time))
+  }
+}
+
+# CL/V parameterization with log-parameters (preferred for PMx)
+# one_comp_cl(Time, dose, lka, lCL, lV) models dose on the same scale as Theoph$Dose (mg/kg)
+one_comp_cl <- function(Time, dose, lka, lCL, lV) {
+  ka <- exp(lka)
+  CL <- exp(lCL)
+  V  <- exp(lV)
+  k  <- CL / V
+  (dose * ka / (V * (ka - k))) * (exp(-k * Time) - exp(-ka * Time))
+}
+```
+
+## Nonlinear mixed-effects modeling with `nlme`
+
+The `nlme` package provides a classical framework for fitting nonlinear mixed-effects models in R. To align with population PK teaching, we prefer a CL/V parameterization and model parameters on the log scale so they remain positive and interpretable.
+
+```{r eval=FALSE}
+# NOTE: this fit can be slow or fail to converge during a live lecture.
+# We set eval=FALSE here so the slide preview won't attempt the fit.
+# Instruct students to run the block locally if they want to re-fit.
+
+# Prepare data: rename dose to lowercase to indicate mg/kg in Theoph
+theoph_data <- Theoph
+theoph_data$dose <- theoph_data$Dose
+
+# sensible starting values (log-scale): lka = log(1), lCL = log(0.04), lV = log(0.5)
+start_list <- c(lka = log(1), lCL = log(0.04), lV = log(0.5))
+
+# Ensure the helper function is visible to nlme by placing it in the global environment
+# (nlme evaluates model expressions in a new environment; making the function available
+# in the global environment avoids "could not find function" errors when running interactively)
+if (exists("one_comp_cl", mode = "function")) {
+  environment(one_comp_cl) <- .GlobalEnv
+}
+
+# Build a formula with a global environment so nlme can evaluate it safely
+f <- conc ~ one_comp_cl(Time, dose, lka, lCL, lV)
+environment(f) <- .GlobalEnv
+
+# Check that nlme is available before attempting the fit
+if (!requireNamespace("nlme", quietly = TRUE)) {
+  stop("Package 'nlme' is required to run this chunk. Install it or run this example with renv restore.")
+}
+
+# Call nlme with the prepared formula object
+nlme_model <- nlme::nlme(
+  f,
+  data = theoph_data,
+  fixed  = lka + lCL + lV ~ 1,
+  random = lCL + lV ~ 1 | Subject,
+  start  = start_list,
+  control = nlme::nlmeControl(msMaxIter = 200, maxIter = 200)
+)
+
+summary(nlme_model)
+```
+
+## Fitted curves by subject (guarded)
+
+```{r}
+# Plot individual vs population predictions only if nlme_model was created
+if (exists("nlme_model")) {
+  theoph_data$pred_individual <- fitted(nlme_model)
+  theoph_data$pred_population <- predict(nlme_model, level = 0)
+
+  ggplot(theoph_data, aes(Time, conc)) +
+    geom_point() +
+    geom_line(aes(y = pred_individual, group = Subject)) +
+    geom_line(aes(y = pred_population, group = Subject), linetype = 2) +
+    facet_wrap(~ Subject) +
+    labs(
+      title = "Nonlinear Mixed-Effects Fit: Individual (solid) vs Population (dashed)",
+      y = "Concentration"
+    ) +
+    theme_minimal()
+} else {
+  ggplot(Theoph, aes(Time, conc)) +
+    geom_point() +
+    facet_wrap(~ Subject) +
+    labs(title = "Observed data (population fit not run)") +
+    theme_minimal()
+}
+```
+
+## Convert fixed effects back to PK parameters (guarded)
+
+```{r}
+if (exists("nlme_model")) {
+  fe <- nlme::fixef(nlme_model)
+  ka_pop <- exp(fe["lka"])
+  CL_pop <- exp(fe["lCL"])
+  V_pop  <- exp(fe["lV"])
+  ke_pop <- CL_pop / V_pop
+  tibble::tibble(
+    ka_pop = ka_pop,
+    CL_pop = CL_pop,
+    V_pop  = V_pop,
+    ke_pop = ke_pop,
+    half_life_pop = log(2) / ke_pop
+  )
+}
+```
+
+## Why population models?
+
+So far, we have fit one subject at a time. But in biomedical research, we usually want to learn both:
+
+-   the typical behavior in the population
+-   the variability among individuals
+
+That is where mixed-effects models become especially useful.
+
+## Fixed effects and random effects
+
+A mixed-effects model separates:
+
+-   **fixed effects**: population-average parameters
+-   **random effects**: subject-specific deviations from the population average
+
+This allows us to quantify inter-individual variability while still borrowing strength across subjects.
+
+## Nonlinear mixed-effects modeling with `nlme`
+
+The `nlme` package provides a classical framework for fitting nonlinear mixed-effects models in R. To align with population PK teaching, we prefer a CL/V parameterization and model parameters on the log scale so they remain positive and interpretable.
+
+```{r eval=FALSE}
+# NOTE: this fit can be slow or fail to converge during a live lecture.
+# We set eval=FALSE here so the slide preview won't attempt the fit.
+# Instruct students to run the block locally if they want to re-fit.
+
+# Prepare data: rename dose to lowercase to indicate mg/kg in Theoph
+theoph_data <- Theoph
+theoph_data$dose <- theoph_data$Dose
+
+# sensible starting values (log-scale): lka = log(1), lCL = log(0.04), lV = log(0.5)
+start_list <- c(lka = log(1), lCL = log(0.04), lV = log(0.5))
+
+# Ensure the helper function is visible to nlme by placing it in the global environment
+# (nlme evaluates model expressions in a new environment; making the function available
+# in the global environment avoids "could not find function" errors when running interactively)
+if (exists("one_comp_cl", mode = "function")) {
+  environment(one_comp_cl) <- .GlobalEnv
+}
+
+# Build a formula with a global environment so nlme can evaluate it safely
+f <- conc ~ one_comp_cl(Time, dose, lka, lCL, lV)
+environment(f) <- .GlobalEnv
+
+# Check that nlme is available before attempting the fit
+if (!requireNamespace("nlme", quietly = TRUE)) {
+  stop("Package 'nlme' is required to run this chunk. Install it or run this example with renv restore.")
+}
+
+# Call nlme with the prepared formula object
+nlme_model <- nlme::nlme(
+  f,
+  data = theoph_data,
+  fixed  = lka + lCL + lV ~ 1,
+  random = lCL + lV ~ 1 | Subject,
+  start  = start_list,
+  control = nlme::nlmeControl(msMaxIter = 200, maxIter = 200)
+)
+
+summary(nlme_model)
+```
+
+## Fitted curves by subject (guarded)
+
+```{r}
+# Plot individual vs population predictions only if nlme_model was created
+if (exists("nlme_model")) {
+  theoph_data$pred_individual <- fitted(nlme_model)
+  theoph_data$pred_population <- predict(nlme_model, level = 0)
+
+  ggplot(theoph_data, aes(Time, conc)) +
+    geom_point() +
+    geom_line(aes(y = pred_individual, group = Subject)) +
+    geom_line(aes(y = pred_population, group = Subject), linetype = 2) +
+    facet_wrap(~ Subject) +
+    labs(
+      title = "Nonlinear Mixed-Effects Fit: Individual (solid) vs Population (dashed)",
+      y = "Concentration"
+    ) +
+    theme_minimal()
+} else {
+  ggplot(Theoph, aes(Time, conc)) +
+    geom_point() +
+    facet_wrap(~ Subject) +
+    labs(title = "Observed data (population fit not run)") +
+    theme_minimal()
+}
+```
+
+## Convert fixed effects back to PK parameters (guarded)
+
+```{r}
+if (exists("nlme_model")) {
+  fe <- nlme::fixef(nlme_model)
+  ka_pop <- exp(fe["lka"])
+  CL_pop <- exp(fe["lCL"])
+  V_pop  <- exp(fe["lV"])
+  ke_pop <- CL_pop / V_pop
+  tibble::tibble(
+    ka_pop = ka_pop,
+    CL_pop = CL_pop,
+    V_pop  = V_pop,
+    ke_pop = ke_pop,
+    half_life_pop = log(2) / ke_pop
+  )
+}
+```
+
+## Covariates and biological explanation
+
+A natural next step is to ask whether subject characteristics explain some of the variability.
+
+For example, body weight may influence scale parameters. A simple extension might model:
+
+$$
+A_i = \alpha_0 + \alpha_1 \cdot \text{Wt}_i + b_i
+$$
+
+This is not the only or best covariate model, but it illustrates the principle that biological covariates can explain heterogeneity.
+
+
+## Model diagnostics matter
+
+No PK/PD fit should be accepted just because it converged.
+
+Always ask:
+
+-   do fitted curves capture the main trend?
+-   are residuals centered around zero?
+-   is variability plausible?
+-   are parameter estimates biologically reasonable?
+-   are there patterns suggesting model misspecification?
+
+## Slide placeholder: diagnostic workflow diagram
+
+**Placeholder for instructor-added figure**
+
+Suggested contents:
+
+-   raw data plot
+-   initial model
+-   fitted curves
+-   residuals
+-   parameter review
+-   model revision
+
+This can help students see modeling as a cycle rather than a single fit.
+
+## Transition from PK to PD
+
+PK tells us concentration over time. PD tells us effect as a function of concentration or an effect-site concentration. A common way to represent a delayed PD response is to use an effect compartment with first-order exchange:
+
+\[
+\frac{dC_e}{dt} = k_{e0}\left(C(t) - C_e(t)\right)
+\]
+
+and then map the effect compartment concentration to effect via an Emax model:
+
+\[
+E(t) = \frac{E_{max} \; C_e(t)}{EC_{50} + C_e(t)}
+\]
+
+We demonstrate this by taking the PK prediction from the fitted one-compartment model, solving the linear ODE for the effect compartment numerically, and then mapping with an Emax relationship.
+
+```{r}
+# Create a time grid directly from the data (no dependency on earlier chunks)
+time_grid <- data.frame(
+  Time = seq(min(Theoph$Time), max(Theoph$Time), length.out = 100)
+)
+
+# Use a simple representative PK curve for demonstration
+# (you could also use a fitted model if available)
+Dose <- unique(Theoph$Dose)[1]
+ka <- 1.2
+CL <- 0.04
+V  <- 0.5
+ke <- CL / V
+
+pk_oral <- function(t, Dose, V, ka, ke) {
+  (Dose * ka / (V * (ka - ke))) * (exp(-ke * t) - exp(-ka * t))
+}
+
+time_grid$conc <- pk_oral(time_grid$Time, Dose, V, ka, ke)
+
+# Now create synthetic PD data using analytic Emax
+set.seed(123)
+
+Emax_true <- 100
+EC50_true <- 5
+
+pd_dat <- time_grid
+pd_dat$effect <- Emax_true * pd_dat$conc / (EC50_true + pd_dat$conc) +
+  rnorm(nrow(pd_dat), sd = 4)
+
+# Fit Emax model
+fit_emax <- nls(
+  effect ~ Emax * conc / (EC50 + conc),
+  data = pd_dat,
+  start = list(Emax = 100, EC50 = 5),
+  control = nls.control(maxiter = 200, warnOnly = TRUE)
+)
+
+# Plot
+conc_grid <- data.frame(
+  conc = seq(min(pd_dat$conc), max(pd_dat$conc), length.out = 200)
+)
+conc_grid$effect_hat <- predict(fit_emax, newdata = conc_grid)
+
+library(ggplot2)
+
+ggplot(pd_dat, aes(x = conc, y = effect)) +
+  geom_point(size = 2) +
+  geom_line(data = conc_grid, aes(x = conc, y = effect_hat), linewidth = 1) +
+  labs(
+    title = "Synthetic PD data (Emax model)",
+    x = "Concentration",
+    y = "Effect"
+  ) +
+  theme_minimal()
+```
+
+## Optional simulation tools: `mrgsolve`
+
+For more mechanistic or simulation-focused teaching, `mrgsolve` is an excellent tool in R.
+
+It is especially useful for:
+
+-   dosing regimen simulation
+-   ODE-based compartment models
+-   PK/PD system simulation
+-   exploring “what if” scenarios
+
+You do not need to use it for the core lecture, but it is a strong extension for students who want to go further.
+
+## Example `mrgsolve` skeleton
+
+```{r eval=FALSE}
+library(mrgsolve)
+
+code <- '
+$PARAM KA = 1.5, KE = 0.1, V = 20
+$CMT GUT CENT
+$ODE
+dxdt_GUT  = -KA*GUT;
+dxdt_CENT =  KA*GUT - KE*CENT;
+$TABLE
+capture CP = CENT/V;
+'
+
+mod <- mcode("oral1cmt", code)
+```
+
+This is enough to show students how a model can move from statistical fitting into simulation.
+
+## Practical advice for students
+
+When students begin fitting PK/PD models, they should build the habit of asking:
+
+-   what biological process am I trying to represent?
+-   what assumptions am I making?
+-   what data support each parameter?
+-   which parameters are actually identifiable?
+-   does a more complex model improve understanding or just add difficulty?
+
+These questions are more important than memorizing syntax.
+
+## Common pitfalls
+
+Some mistakes occur repeatedly in early PK/PD work:
+
+-   treating all nonlinear fitting failures as software problems
+-   overinterpreting poorly identified parameters
+-   ignoring residual structure
+-   fitting a mechanistic model without enough data support
+-   confusing a better-looking fit with a better scientific explanation
+
+These are worth emphasizing explicitly.
+
+## Summary of modeling approaches
+
+| Approach | Strength | Limitation |
+|------------------------|------------------------|------------------------|
+| `lm` | simple and intuitive | only approximate for terminal phase |
+| `nls` | fits nonlinear models directly | sensitive to starts and model specification |
+| `nlme` | handles repeated measures and variability | more complex to specify and diagnose |
+| `mrgsolve` | powerful for simulation and mechanism | not primarily a fitting tool |
+
+## Suggested classroom flow
+
+For a 1- to 2-hour lecture, one effective flow is:
+
+-   15 minutes: PK/PD concepts and equations
+-   15 minutes: exploring the `Theoph` dataset
+-   20 minutes: `lm` and `nls` examples
+-   20 minutes: mixed-effects modeling with `nlme`
+-   10 minutes: PD and Emax ideas
+-   10 minutes: questions, interpretation, and assignment setup
+
+You can adjust the balance depending on student background.
+
+## Assignment for next week
+
+Students should work individually or in pairs.
+
+### Part 1: exploratory analysis
+
+Using the `Theoph` dataset:
+
+-   plot concentration versus time for all subjects
+-   choose one subject and describe the qualitative shape of the profile
+-   identify which part of the profile is likely dominated by elimination
+
+### Part 2: simple fitting
+
+For one chosen subject:
+
+-   fit a terminal-phase linear model using `lm`
+-   estimate the elimination rate constant and half-life
+-   discuss the limitations of this approximation
+
+### Part 3: nonlinear fitting
+
+For the same subject:
+
+-   fit a nonlinear oral PK model using `nls`
+-   plot observed and fitted concentrations
+-   discuss sensitivity to starting values
+
+### Part 4: population model
+
+Using all subjects:
+
+-   fit a basic nonlinear mixed-effects model with `nlme`
+-   report fixed effects and random-effect variability
+-   comment on inter-individual differences
+
+### Part 5: interpretation
+
+Write a short report addressing:
+
+-   which model was most biologically interpretable?
+-   which model was easiest to fit?
+-   what features of the data remain unexplained?
+-   what additional data would help improve the model?
+
+## Optional stretch assignment
+
+Students who want an extra challenge can do one of the following:
+
+-   simulate a PK profile with `mrgsolve`
+-   create an illustrative PD dataset and fit an Emax model
+-   test whether body weight helps explain one PK parameter
+-   compare additive versus proportional error assumptions conceptually
+
+## What I would look for in grading
+
+A strong submission should show:
+
+-   correct code that runs
+-   clear plots with labels
+-   biologically sensible interpretation
+-   recognition of model limitations
+-   thoughtful comparison between methods
+
+The goal is not perfect modeling. The goal is scientific reasoning with models.
+
+## Closing thoughts
+
+PK/PD modeling is most useful when students learn to connect mathematics, data, and biology.
+
+The central message of this lecture is that models are not just curve-fitting tools. They are structured hypotheses about dynamic biological systems. Good modeling requires both technical skill and scientific judgment.
+
+## References
+
+-   Pinheiro J, Bates D. *Mixed-Effects Models in S and S-PLUS*. Springer.
+-   Gabrielsson J, Weiner D. *Pharmacokinetic and Pharmacodynamic Data Analysis: Concepts and Applications*.
+-   Bonate PL. *Pharmacokinetic-Pharmacodynamic Modeling and Simulation*.
+-   Mentré F, Mallet A, Baccar D. Practical use of population pharmacokinetic methods.
+-   R Core Team. *R: A Language and Environment for Statistical Computing*.
+-   `nlme` package documentation in R.
+-   `mrgsolve` user guide and package documentation.
+-   Upton RN, Mould DR. Basic concepts in population modeling, simulation, and model-based drug development.
+
+## Session wrap-up discussion questions
+
+-   Why is the terminal-phase linear fit only an approximation?
+-   What biological meaning can we attach to random effects?
+-   When would a simple Emax model fail?
+-   What kind of data would justify a more mechanistic systems model?
+
+## Appendix: reproducibility notes
+
+If students run into convergence issues, remind them to:
+
+-   inspect the data visually first
+-   rescale variables if needed
+-   choose better starting values
+-   simplify the model
+-   fit one subject before fitting the population
+-   interpret cautiously when the model is unstable
